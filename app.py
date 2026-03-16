@@ -6,19 +6,54 @@ import pandas as pd
 st.set_page_config(page_title="Tra cứu TKB", layout="wide")
 st.title("📚 Công cụ Lọc và Xếp Lịch Học")
 
-# 2. Khởi tạo State để lưu "Danh sách chờ" (Giỏ hàng)
-if 'selected_classes' not in st.session_state:
-    st.session_state.selected_classes = pd.DataFrame()
+# 2. Khởi tạo State
+if 'selected_dict' not in st.session_state:
+    st.session_state.selected_dict = {}
+# Khởi tạo state ẩn để lưu trữ bảng dữ liệu của lần render trước đó (phục vụ cho callback)
+if 'current_search_results' not in st.session_state:
+    st.session_state.current_search_results = pd.DataFrame()
+if 'current_cart_results' not in st.session_state:
+    st.session_state.current_cart_results = pd.DataFrame()
 
-# 3. Kết nối Database
-# Lưu ý: Sửa lại tên bảng nếu trong db của bạn khác với "thoi_khoa_bieu"
+# 3. Định nghĩa Callback - Trái tim của việc chống lỗi "Click nhanh"
+def update_cart():
+    """Hàm này tự động chạy ngầm mỗi khi bạn tick/bỏ tick ở bảng Tìm kiếm"""
+    # Lấy danh sách các ô vừa bị thay đổi
+    changes = st.session_state.search_table.get("edited_rows", {})
+    df_prev = st.session_state.current_search_results
+    
+    for row_idx, edit in changes.items():
+        if "Chọn" in edit:
+            if row_idx < len(df_prev):
+                row_data = df_prev.iloc[row_idx]
+                row_id = row_data['ID_Lop']
+                
+                # Nếu tick
+                if edit["Chọn"]:
+                    st.session_state.selected_dict[row_id] = row_data.to_dict()
+                # Nếu bỏ tick
+                else:
+                    st.session_state.selected_dict.pop(row_id, None)
+
+def remove_from_cart():
+    """Hàm này tự động chạy ngầm mỗi khi bạn bỏ tick trực tiếp ở Giỏ hàng"""
+    changes = st.session_state.cart_table.get("edited_rows", {})
+    df_prev_cart = st.session_state.current_cart_results
+    
+    for row_idx, edit in changes.items():
+        if "Chọn" in edit and not edit["Chọn"]: # Nếu hành động là "Bỏ tick"
+            if row_idx < len(df_prev_cart):
+                row_id = df_prev_cart.iloc[row_idx]['ID_Lop']
+                st.session_state.selected_dict.pop(row_id, None)
+
+# 4. Kết nối Database
 @st.cache_resource
 def get_connection():
     return sqlite3.connect('truong_ptit.db', check_same_thread=False)
 
 conn = get_connection()
 
-# 4. Giao diện Tìm kiếm
+# 5. Giao diện Tìm kiếm
 st.subheader("🔍 Tìm kiếm môn học")
 col1, col2, col3 = st.columns(3)
 
@@ -35,7 +70,7 @@ with col4:
 with col5:
     ma_lop = st.text_input("Mã Lớp (VD: D23CQCN01-N)")
 
-# 5. Xây dựng Query linh hoạt dựa trên input
+# Xây dựng Query
 query = "SELECT * FROM thoi_khoa_bieu WHERE 1=1"
 params = []
 
@@ -55,54 +90,73 @@ if thu != "Tất cả":
     query += " AND [Thứ] = ?"
     params.append(thu)
 
-# Thực thi Query
+# Thực thi Query và Render bảng Tìm kiếm
 try:
     df_results = pd.read_sql_query(query, conn, params=params)
-    st.write(f"**Tìm thấy {len(df_results)} kết quả:**")
     
-    # Hiển thị bảng kết quả và cho phép chọn (Tính năng DataFrame mới của Streamlit)
-    event_selection = st.dataframe(
-        df_results, 
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="multi-row" # Cho phép chọn nhiều hàng cùng lúc
-    )
-    
-    # 6. Nút Thêm vào Danh sách chờ
-    selected_indices = event_selection.selection.rows
-    if st.button("➕ Thêm môn đã chọn vào danh sách chờ"):
-        if selected_indices:
-            selected_rows = df_results.iloc[selected_indices]
-            # Nối vào danh sách hiện tại và loại bỏ trùng lặp (ví dụ dựa trên Mã Môn + Mã Lớp)
-            st.session_state.selected_classes = pd.concat(
-                [st.session_state.selected_classes, selected_rows]
-            ).drop_duplicates()
-            st.success("Đã thêm thành công!")
-        else:
-            st.warning("Vui lòng chọn ít nhất một môn học từ bảng trên.")
-
+    if not df_results.empty:
+        st.write(f"**Tìm thấy {len(df_results)} kết quả:**")
+        
+        df_results['ID_Lop'] = df_results['Mã Môn'].astype(str) + "_" + df_results['Mã Lớp'].astype(str)
+        df_results.insert(0, "Chọn", df_results["ID_Lop"].isin(st.session_state.selected_dict.keys()))
+        
+        # Lưu trữ lại bảng hiện tại vào state ĐỂ CALLBACK CÓ THỂ ĐỌC ĐƯỢC
+        st.session_state.current_search_results = df_results
+        
+        st.data_editor(
+            df_results,
+            column_config={
+                "Chọn": st.column_config.CheckboxColumn("Chọn", help="Tick để lưu", default=False),
+                "ID_Lop": None # Ẩn cột ID
+            },
+            disabled=[col for col in df_results.columns if col not in ["Chọn"]], 
+            hide_index=True,
+            use_container_width=True,
+            key="search_table",
+            on_change=update_cart # Kích hoạt Callback chống lỗi click nhanh
+        )
+    else:
+        st.info("Không tìm thấy môn học nào phù hợp với từ khóa.")
 except Exception as e:
-    st.error(f"Lỗi truy vấn Database. Hãy kiểm tra lại tên bảng và tên cột. Chi tiết lỗi: {e}")
+    st.error(f"Lỗi truy vấn Database: {e}")
 
-# 7. Hiển thị Danh sách chờ (Giỏ hàng)
+# 6. Hiển thị Giỏ hàng
 st.divider()
 st.subheader("🛒 Danh sách các môn đã chọn")
 
-if not st.session_state.selected_classes.empty:
-    st.dataframe(st.session_state.selected_classes, use_container_width=True, hide_index=True)
+if st.session_state.selected_dict:
+    df_selected = pd.DataFrame(list(st.session_state.selected_dict.values()))
+    df_selected['Chọn'] = True
     
-    if st.button("🗑️ Xóa danh sách"):
-        st.session_state.selected_classes = pd.DataFrame()
-        st.rerun()
+    st.session_state.current_cart_results = df_selected
     
-    # Placeholder cho tính năng xuất file .ics sau này
-    st.download_button(
-        label="📅 Xuất file .ics (Coming soon)",
-        data="Đây sẽ là nội dung file ics",
-        file_name="thoikhoabieu.ics",
-        mime="text/calendar",
-        disabled=True
+    st.data_editor(
+        df_selected,
+        column_config={
+            "Chọn": st.column_config.CheckboxColumn("Đã chọn", help="Bỏ tick để xóa", default=True),
+            "ID_Lop": None
+        },
+        disabled=[col for col in df_selected.columns if col not in ["Chọn"]],
+        hide_index=True,
+        use_container_width=True,
+        key="cart_table",
+        on_change=remove_from_cart # Kích hoạt Callback cho giỏ hàng
     )
+    
+    # Nút dọn dẹp
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🗑️ Xóa tất cả danh sách"):
+            st.session_state.selected_dict = {}
+            st.rerun()
+            
+    with col_btn2:
+        st.download_button(
+            label="📅 Xuất file .ics (Coming soon)",
+            data="Đây sẽ là nội dung file ics",
+            file_name="thoikhoabieu.ics",
+            mime="text/calendar",
+            disabled=True
+        )
 else:
-    st.info("Danh sách chờ đang trống.")
+    st.info("Danh sách chờ đang trống. Hãy tick chọn môn học ở bảng tìm kiếm!")
